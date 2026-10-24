@@ -282,6 +282,23 @@
   }
   .r-tag.is-gk { background: #d1fae5; border-color: #6ee7b7; color: #065f46; font-weight: 800; }
   .del-x { color: #ef4444; font-weight: 900; cursor: pointer; margin-left: 2px; }
+
+  /* 記録完了トースト */
+  .toast {
+    position: fixed; left: 50%; bottom: 64px; transform: translateX(-50%);
+    max-width: 92%; padding: 8px 14px; border-radius: 8px;
+    background: rgba(15,23,42,0.92); color: #fff;
+    font-size: 13px; font-weight: 800; text-align: center;
+    opacity: 0; pointer-events: none; transition: opacity 0.15s; z-index: 50;
+  }
+  .toast.show { opacity: 1; }
+  .toast.warn { background: rgba(185,28,28,0.95); }
+
+  /* 未選択の項目を知らせる点滅 */
+  .need-input { animation: needFlash 0.6s ease 2; }
+  @keyframes needFlash {
+    50% { border-color: #ef4444; box-shadow: 0 0 0 2px #fecaca; background: #fff1f2; }
+  }
 </style>
 </head>
 <body>
@@ -339,7 +356,7 @@
         </div>
 
         <!-- ② シュート・プレーした選手選択 -->
-        <div class="compact-sec player-sec">
+        <div class="compact-sec player-sec" id="shooterSec">
           <div class="sec-head">
             <span id="shooterLabel">🏃 自チームの選手（背番号タップ）</span>
             <span class="selected-badge" id="selectedShooterBadge">未選択</span>
@@ -348,10 +365,10 @@
         </div>
 
         <!-- ③ シュート位置・発生エリア -->
-        <div class="compact-sec zone-sec">
+        <div class="compact-sec zone-sec" id="zoneSec">
           <div class="sec-head">
             <span>📍 シュート位置 / プレーエリア</span>
-            <span class="selected-badge" id="selectedZoneBadge">6m</span>
+            <span class="selected-badge" id="selectedZoneBadge">未選択</span>
           </div>
           <div class="zone-grid" id="zoneGrid"></div>
         </div>
@@ -527,6 +544,8 @@
   </div>
 </div>
 
+<div class="toast" id="toast"></div>
+
 <script>
 const PERIODS = ['0-5分','5-10分','10-15分','15-20分','20-25分','25-30分'];
 const ZONES = ['6m','9m','左サイド','右サイド','速攻','カットイン','7m'];
@@ -535,11 +554,12 @@ let state = {
   half: '前半',
   period: '0-5分',
   sec: 0,
+  halfSec: { '前半': 0, '後半': 0 }, // 前後半それぞれの経過秒
   running: false,
   attackMode: 'my', // 'my' or 'opp'
-  selectedShooter: { my: 7, opp: 10 },
+  selectedShooter: { my: null, opp: null },
   activeGk: { my: 1, opp: 1 }, // 現在コートに出ているGK背番号
-  selectedZone: '6m',
+  selectedZone: null,
   statTeam: 'my',
   statHalf: 'ALL',
   rosters: {
@@ -578,6 +598,13 @@ let state = {
 };
 
 let timerId = null;
+let timerStart = 0;
+let lastRecordTs = 0;
+let toastTimer = null;
+
+const otherTeam = t => t === 'my' ? 'opp' : 'my';
+const zoneLabel = z => z || '-';
+const numLabel = n => n ? `#${n}` : '-';
 
 // ローカル保存・復元
 function saveState() {
@@ -600,9 +627,37 @@ function getPlayerLabel(team, num) {
   return p.name ? `#${p.num} ${p.name}` : `#${p.num}`;
 }
 
+// 記録時のフィードバック（トースト＋振動）
+function showToast(msg, warn) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.toggle('warn', !!warn);
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), warn ? 1800 : 1300);
+  if (navigator.vibrate) navigator.vibrate(warn ? [40, 60, 40] : 30);
+}
+
+// 未選択の欄を点滅させる
+function flashNeed(id) {
+  const el = document.getElementById(id);
+  el.classList.remove('need-input');
+  void el.offsetWidth;
+  el.classList.add('need-input');
+}
+
+// 連打による二重記録を防ぐ
+function isDoubleTap() {
+  const now = Date.now();
+  if (now - lastRecordTs < 400) return true;
+  lastRecordTs = now;
+  return false;
+}
+
 // 初期化
 function init() {
   loadState();
+  updateClock(false);
   renderTopBar();
   renderRecScreen();
   renderRostersConfig();
@@ -625,9 +680,15 @@ function renderTopBar() {
   ).join('');
 }
 
+// 前後半切替：それぞれの経過時間を保持する
 function setHalf(h) {
+  if (state.half === h) return;
+  if (state.running) toggleTimer();
+  state.halfSec[state.half] = state.sec;
   state.half = h;
+  state.sec = state.halfSec[h] || 0;
   saveState();
+  updateClock(true);
   renderTopBar();
 }
 function setPeriod(p) {
@@ -636,6 +697,21 @@ function setPeriod(p) {
   renderTopBar();
 }
 
+// 時計表示（autoPeriod=true なら経過時間から時間帯も合わせる）
+function updateClock(autoPeriod) {
+  const m = Math.floor(state.sec / 60);
+  const s = state.sec % 60;
+  document.getElementById('clockDisp').textContent =
+    `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  if (!autoPeriod) return;
+  const p = PERIODS[Math.min(5, Math.floor(m / 5))];
+  if (state.period !== p) {
+    state.period = p;
+    renderTopBar();
+  }
+}
+
+// 開始時刻からの差で数えるので、画面ロック中も時間がずれない
 function toggleTimer() {
   const btn = document.getElementById('btnTimer');
   if (state.running) {
@@ -647,19 +723,15 @@ function toggleTimer() {
     state.running = true;
     btn.textContent = '停止';
     btn.classList.add('running');
+    timerStart = Date.now() - state.sec * 1000;
     timerId = setInterval(() => {
-      state.sec++;
-      const m = Math.floor(state.sec / 60);
-      const s = state.sec % 60;
-      document.getElementById('clockDisp').textContent =
-        `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
-      const pIdx = Math.min(5, Math.floor(m / 5));
-      if (state.period !== PERIODS[pIdx]) {
-        state.period = PERIODS[pIdx];
-        renderTopBar();
-      }
-    }, 1000);
+      const sec = Math.floor((Date.now() - timerStart) / 1000);
+      if (sec === state.sec) return;
+      state.sec = sec;
+      updateClock(true);
+    }, 250);
   }
+  saveState();
 }
 
 // 攻撃チーム切替
@@ -720,7 +792,7 @@ function renderRecScreen() {
   }).join('');
 
   // 3. ゾーン選択
-  document.getElementById('selectedZoneBadge').textContent = state.selectedZone;
+  document.getElementById('selectedZoneBadge').textContent = state.selectedZone || '未選択';
   document.getElementById('zoneGrid').innerHTML = ZONES.map(z => `
     <div class="z-btn ${state.selectedZone === z ? 'active' : ''}" onclick="selectZone('${z}')">${z}</div>
   `).join('');
@@ -739,7 +811,7 @@ function renderRecScreen() {
   } else {
     const tName = last.team === 'my' ? '自' : '相';
     const gkTxt = last.gkNum ? ` (対GK#${last.gkNum})` : '';
-    logEl.textContent = `直前: [${last.half}${last.period}] ${tName}#${last.playerNum} ${last.zone} → ${last.action}${gkTxt}`;
+    logEl.textContent = `直前: [${last.half}${last.period}] ${tName}${numLabel(last.playerNum)} ${zoneLabel(last.zone)} → ${last.action}${gkTxt}`;
   }
 }
 
@@ -759,19 +831,43 @@ function selectZone(z) {
   renderRecScreen();
 }
 
-// シュート記録
+// 記録を追加し、必要なら攻守を交代して選択をリセット
+function commitEvent(ev, switchSide) {
+  state.events.push(ev);
+  const who = `${ev.team === 'my' ? '自' : '相'}${numLabel(ev.playerNum)}`;
+  let msg = `${who} ${ev.action.replace('TO:', '')} を記録`;
+  if (switchSide) {
+    state.attackMode = otherTeam(ev.team);
+    state.selectedShooter[state.attackMode] = null;
+    state.selectedZone = null;
+    msg += ` → ${state.attackMode === 'my' ? '🟦 自チーム' : '🟥 相手'}の攻撃へ`;
+  }
+  saveState();
+  renderTopBar();
+  renderRecScreen();
+  showToast(msg);
+}
+
+// シュート記録（記録後は相手の攻撃に切り替わる）
 function recordShot(resultType) {
   const atkTeam = state.attackMode;
-  const defTeam = atkTeam === 'my' ? 'opp' : 'my';
+  const defTeam = otherTeam(atkTeam);
   const shooterNum = state.selectedShooter[atkTeam];
   const gkNum = state.activeGk[defTeam];
 
   if (!shooterNum) {
-    alert('シュートを打った選手（背番号）をタップしてください');
+    flashNeed('shooterSec');
+    showToast('シュートした選手（背番号）を選んでください', true);
     return;
   }
+  if (!state.selectedZone) {
+    flashNeed('zoneSec');
+    showToast('シュート位置を選んでください', true);
+    return;
+  }
+  if (isDoubleTap()) return;
 
-  state.events.push({
+  commitEvent({
     id: Date.now(),
     half: state.half,
     period: state.period,
@@ -782,43 +878,42 @@ function recordShot(resultType) {
     zone: state.selectedZone,
     category: 'shot',
     action: resultType
-  });
-
-  saveState();
-  renderTopBar();
-  renderRecScreen();
+  }, true);
 }
 
-// ターンオーバー・反則記録
+// ターンオーバー・反則記録（ターンオーバーのみ攻守交代）
 function recordSub(actionName) {
+  if (isDoubleTap()) return;
   const atkTeam = state.attackMode;
   const shooterNum = state.selectedShooter[atkTeam] || 0;
   const isTO = actionName.startsWith('TO:');
 
-  state.events.push({
+  commitEvent({
     id: Date.now(),
     half: state.half,
     period: state.period,
     team: atkTeam,
     playerNum: shooterNum,
-    defTeam: atkTeam === 'my' ? 'opp' : 'my',
+    defTeam: otherTeam(atkTeam),
     gkNum: null,
     zone: state.selectedZone,
     category: isTO ? 'to' : 'foul',
     action: actionName
-  });
-
-  saveState();
-  renderRecScreen();
+  }, isTO);
 }
 
+// 取り消した記録の攻撃側・選手・位置に戻すので、そのまま入力し直せる
 function undoLast() {
   if (state.events.length === 0) return;
-  state.events.pop();
+  const last = state.events.pop();
+  state.attackMode = last.team;
+  if (last.playerNum) state.selectedShooter[last.team] = last.playerNum;
+  state.selectedZone = last.zone || null;
   saveState();
   renderTopBar();
   renderRecScreen();
   renderAllStats();
+  showToast(`↩️ 取り消し: ${last.team === 'my' ? '自' : '相'}${numLabel(last.playerNum)} ${last.action.replace('TO:', '')}`);
 }
 
 // タブ切替
@@ -1008,7 +1103,7 @@ function renderAllStats() {
     toTypes.forEach(t => {
       const list = toEvs.filter(e => e.action === t);
       const zoneCounts = {};
-      list.forEach(x => zoneCounts[x.zone] = (zoneCounts[x.zone]||0)+1);
+      list.forEach(x => zoneCounts[zoneLabel(x.zone)] = (zoneCounts[zoneLabel(x.zone)]||0)+1);
       const zoneSummary = Object.entries(zoneCounts).map(([k,v]) => `${k}(${v})`).join(', ');
       toHtml += `
         <tr>
@@ -1060,8 +1155,8 @@ function renderHistoryTable() {
       <tr>
         <td>${e.half}${e.period}</td>
         <td style="color:${isMy?'#1d4ed8':'#dc2626'};font-weight:800;">${isMy?'自':'相'}</td>
-        <td style="font-weight:800;">#${e.playerNum}</td>
-        <td>${e.zone}</td>
+        <td style="font-weight:800;">${numLabel(e.playerNum)}</td>
+        <td>${zoneLabel(e.zone)}</td>
         <td style="font-weight:800;">${e.action}</td>
         <td>${e.gkNum ? `#${e.gkNum}` : '-'}</td>
       </tr>`;
@@ -1148,7 +1243,7 @@ function exportCSV(type) {
   } else {
     csv += '前後半,時間帯,攻撃側,選手背番号,シュート位置,結果,対面GK背番号\n';
     state.events.forEach(e => {
-      csv += `${e.half},${e.period},${e.team==='my'?'自チーム':'相手'},${e.playerNum},${e.zone},${e.action},${e.gkNum||''}\n`;
+      csv += `${e.half},${e.period},${e.team==='my'?'自チーム':'相手'},${e.playerNum||''},${e.zone||''},${e.action},${e.gkNum||''}\n`;
     });
   }
 
