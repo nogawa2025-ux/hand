@@ -19,7 +19,8 @@
   }
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
   html, body {
-    width: 100%; height: 100dvh; overflow: hidden;
+    width: 100%; height: 100vh; height: 100dvh; overflow: hidden;
+    touch-action: manipulation;
     font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif;
     background: var(--dark); color: #1e293b;
     user-select: none;
@@ -28,7 +29,7 @@
   /* 全体コンテナ：100dvh固定でスクロールなし */
   .app-shell {
     display: flex; flex-direction: column;
-    width: 100%; max-width: 500px; height: 100dvh;
+    width: 100%; max-width: 500px; height: 100vh; height: 100dvh;
     margin: 0 auto; background: #f8fafc;
   }
 
@@ -598,25 +599,37 @@ let state = {
 };
 
 let timerId = null;
-let timerStart = 0;
 let lastRecordTs = 0;
 let toastTimer = null;
+let saveWarned = false;
 
 const otherTeam = t => t === 'my' ? 'opp' : 'my';
 const zoneLabel = z => z || '-';
 const numLabel = n => n ? `#${n}` : '-';
 
-// ローカル保存・復元
+// 名前に < や & が入っても画面が崩れないようにする
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+// CSVの1項目（カンマや改行を含む名前でも列がずれないようにする）
+const csvCell = v => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v);
+
+// ローカル保存・復元（プライベートブラウズ等で保存できなくても操作は止めない）
 function saveState() {
-  localStorage.setItem('hb_pro_gk_v1', JSON.stringify(state));
+  try {
+    localStorage.setItem('hb_pro_gk_v1', JSON.stringify(state));
+  } catch(e) {
+    if (!saveWarned) {
+      saveWarned = true;
+      alert('この端末では記録を保存できません（プライベートブラウズ等）。画面を閉じると記録が消えるので、こまめにCSV出力してください。');
+    }
+  }
 }
 function loadState() {
-  const raw = localStorage.getItem('hb_pro_gk_v1');
+  let raw = null;
+  try { raw = localStorage.getItem('hb_pro_gk_v1'); } catch(e) {}
   if (raw) {
     try {
       const parsed = JSON.parse(raw);
       state = Object.assign(state, parsed);
-      state.running = false;
     } catch(e) {}
   }
 }
@@ -658,10 +671,19 @@ function isDoubleTap() {
 function init() {
   loadState();
   updateClock(false);
+  // 再読み込み前にタイマーが動いていたら、その時刻から続けて数える
+  if (state.running && state.timerStart) {
+    state.running = false;
+    toggleTimer(state.timerStart);
+  } else {
+    state.running = false;
+  }
   renderTopBar();
   renderRecScreen();
   renderRostersConfig();
-  renderAllStats();
+  // 分析タブのボタン表示を保存されていた絞り込みに合わせる（中でrenderAllStatsも呼ぶ）
+  setStatFilter(state.statTeam);
+  setHalfFilter(state.statHalf);
 }
 
 // 上部バー描画
@@ -712,24 +734,29 @@ function updateClock(autoPeriod) {
 }
 
 // 開始時刻からの差で数えるので、画面ロック中も時間がずれない
-function toggleTimer() {
+// 開始時刻は保存しておき、ページが再読み込みされても時間を失わない
+function toggleTimer(resumeFrom) {
   const btn = document.getElementById('btnTimer');
+  const tick = () => {
+    const sec = Math.floor((Date.now() - state.timerStart) / 1000);
+    if (sec === state.sec) return;
+    state.sec = sec;
+    updateClock(true);
+  };
   if (state.running) {
     clearInterval(timerId);
+    tick();
     state.running = false;
+    state.timerStart = null;
     btn.textContent = '開始';
     btn.classList.remove('running');
   } else {
     state.running = true;
+    state.timerStart = resumeFrom || Date.now() - state.sec * 1000;
     btn.textContent = '停止';
     btn.classList.add('running');
-    timerStart = Date.now() - state.sec * 1000;
-    timerId = setInterval(() => {
-      const sec = Math.floor((Date.now() - timerStart) / 1000);
-      if (sec === state.sec) return;
-      state.sec = sec;
-      updateClock(true);
-    }, 250);
+    tick();
+    timerId = setInterval(tick, 250);
   }
   saveState();
 }
@@ -759,8 +786,9 @@ function renderRecScreen() {
   const gks = defRoster.filter(p => p.isGk);
   const gkCandidates = gks.length > 0 ? gks : defRoster;
 
-  if (!state.activeGk[defTeam] && gkCandidates.length > 0) {
-    state.activeGk[defTeam] = gkCandidates[0].num;
+  // 出場GKが登録から削除されていたら、残っている候補に付け替える
+  if (!gkCandidates.some(p => p.num === state.activeGk[defTeam])) {
+    state.activeGk[defTeam] = gkCandidates.length > 0 ? gkCandidates[0].num : null;
   }
   const curGkNum = state.activeGk[defTeam];
   document.getElementById('selectedGkBadge').textContent = curGkNum ? getPlayerLabel(defTeam, curGkNum) : '未選択';
@@ -768,7 +796,7 @@ function renderRecScreen() {
   document.getElementById('gkList').innerHTML = gkCandidates.map(p => `
     <div class="gk-chip ${p.num === curGkNum ? 'active' : ''}" onclick="selectGk('${defTeam}', ${p.num})">
       <span>#${p.num}</span>
-      <span>${p.name || 'GK'}</span>
+      <span>${esc(p.name || 'GK')}</span>
     </div>
   `).join('');
 
@@ -786,7 +814,7 @@ function renderRecScreen() {
     return `
       <div class="p-btn ${selClass}" onclick="selectShooter('${atkTeam}', ${p.num})">
         <span class="p-num">#${p.num}</span>
-        <span class="p-name">${p.name || (p.isGk ? 'GK' : '')}</span>
+        <span class="p-name">${esc(p.name || (p.isGk ? 'GK' : ''))}</span>
       </div>
     `;
   }).join('');
@@ -980,7 +1008,7 @@ function renderAllStats() {
 
     gkRowsHtml += `
       <tr>
-        <td style="text-align:left;font-weight:800;">${getPlayerLabel(targetTeam, num)}</td>
+        <td style="text-align:left;font-weight:800;">${esc(getPlayerLabel(targetTeam, num))}</td>
         <td style="font-weight:800;color:#047857;">${sv}</td>
         <td style="color:#dc2626;">${gl}</td>
         <td>${onTarget}</td>
@@ -1028,10 +1056,11 @@ function renderAllStats() {
     : '🟥 相手チーム選手別 シュート決定率・ミス集計';
 
   const teamEvents = evList.filter(e => e.team === targetTeam);
+  // 選手を選ばずに記録したTO等（背番号0）も「選手なし」行として合計に含める
   const pNums = Array.from(new Set([
     ...state.rosters[targetTeam].map(p => p.num),
-    ...teamEvents.map(e => e.playerNum).filter(Boolean)
-  ])).sort((a,b) => a - b);
+    ...teamEvents.map(e => e.playerNum || 0)
+  ])).sort((a,b) => (a || 999) - (b || 999));
 
   let pHtml = `
     <tr>
@@ -1041,7 +1070,7 @@ function renderAllStats() {
   let sumG=0, sumS=0, sumSv=0, sumOut=0, sumPost=0, sumTO=0, sum2m=0;
 
   pNums.forEach(num => {
-    const pEvs = teamEvents.filter(e => e.playerNum === num);
+    const pEvs = teamEvents.filter(e => (e.playerNum || 0) === num);
     const shots = pEvs.filter(e => e.category === 'shot');
     const g = shots.filter(e => e.action === 'ゴール').length;
     const sv = shots.filter(e => e.action === 'GKセーブ').length;
@@ -1056,7 +1085,7 @@ function renderAllStats() {
 
     pHtml += `
       <tr>
-        <td style="text-align:left;font-weight:800;">${getPlayerLabel(targetTeam, num)}</td>
+        <td style="text-align:left;font-weight:800;">${num ? esc(getPlayerLabel(targetTeam, num)) : '選手なし'}</td>
         <td style="font-weight:800;">${g} / ${s}</td>
         <td class="rate-good">${s > 0 ? ((g/s)*100).toFixed(1)+'%' : '-'}</td>
         <td>${sv}</td><td>${out}</td><td>${post}</td>
@@ -1171,7 +1200,7 @@ function renderRostersConfig() {
     const sorted = [...state.rosters[t]].sort((a,b) => a.num - b.num);
     box.innerHTML = sorted.map(p => `
       <div class="r-tag ${p.isGk ? 'is-gk' : ''}">
-        <span>${p.isGk ? '🧤' : ''}#${p.num} ${p.name}</span>
+        <span>${p.isGk ? '🧤' : ''}#${p.num} ${esc(p.name)}</span>
         <span class="del-x" onclick="removePlayer('${t}', ${p.num})">×</span>
       </div>
     `).join('');
@@ -1184,7 +1213,10 @@ function addPlayer(team) {
   const gkIn = document.getElementById(team === 'my' ? 'inMyGk' : 'inOppGk');
 
   const num = parseInt(numIn.value, 10);
-  if (isNaN(num)) return;
+  if (isNaN(num) || num < 1 || num > 99) {
+    alert('背番号は1〜99で入力してください');
+    return;
+  }
   const name = nameIn.value.trim();
   const isGk = gkIn.checked;
 
@@ -1199,6 +1231,8 @@ function addPlayer(team) {
 
 function removePlayer(team, num) {
   state.rosters[team] = state.rosters[team].filter(p => p.num !== num);
+  // 削除した選手が選択されたままだと、いない選手で記録されてしまう
+  if (state.selectedShooter[team] === num) state.selectedShooter[team] = null;
   saveState();
   renderRostersConfig();
   renderRecScreen();
@@ -1220,16 +1254,17 @@ function exportCSV(type) {
         const out = sList.filter(e => e.action === '枠外' || e.action === 'ポスト').length;
         const onT = sv + gl;
         const rate = onT > 0 ? ((sv/onT)*100).toFixed(1) : '0.0';
-        csv += `${t==='my'?'自チーム':'相手'},${num},${getPlayerLabel(t,num)},${sv},${gl},${onT},${rate},${out}\n`;
+        const gkName = (state.rosters[t].find(p => p.num === num) || {}).name || '';
+        csv += `${t==='my'?'自チーム':'相手'},${num},${csvCell(gkName)},${sv},${gl},${onT},${rate},${out}\n`;
       });
     });
   } else if (type === 'player') {
     csv += '所属,背番号,選手名,得点,試投数,決定率(%),被セーブ,枠外,ポスト,ターンオーバー数\n';
     ['my','opp'].forEach(t => {
       const evs = state.events.filter(e => e.team === t);
-      const nums = Array.from(new Set(evs.map(e => e.playerNum))).sort((a,b)=>a-b);
+      const nums = Array.from(new Set(evs.map(e => e.playerNum || 0))).sort((a,b) => (a || 999) - (b || 999));
       nums.forEach(n => {
-        const pEvs = evs.filter(e => e.playerNum === n);
+        const pEvs = evs.filter(e => (e.playerNum || 0) === n);
         const shots = pEvs.filter(e => e.category === 'shot');
         const g = shots.filter(e => e.action === 'ゴール').length;
         const sv = shots.filter(e => e.action === 'GKセーブ').length;
@@ -1237,7 +1272,8 @@ function exportCSV(type) {
         const post = shots.filter(e => e.action === 'ポスト').length;
         const to = pEvs.filter(e => e.category === 'to').length;
         const rate = shots.length > 0 ? ((g/shots.length)*100).toFixed(1) : '0.0';
-        csv += `${t==='my'?'自チーム':'相手'},${n},${getPlayerLabel(t,n)},${g},${shots.length},${rate},${sv},${out},${post},${to}\n`;
+        const pName = n ? ((state.rosters[t].find(p => p.num === n) || {}).name || '') : '選手なし';
+        csv += `${t==='my'?'自チーム':'相手'},${n || ''},${csvCell(pName)},${g},${shots.length},${rate},${sv},${out},${post},${to}\n`;
       });
     });
   } else {
@@ -1251,7 +1287,10 @@ function exportCSV(type) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `handball_${type}.csv`;
+  document.body.appendChild(a);
   a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
 // LINE共有用サマリーコピー
@@ -1271,13 +1310,17 @@ function copyShareSummary() {
 自チーム決定率：${myG}/${myShots.length} (${myShots.length?((myG/myShots.length)*100).toFixed(1):0}%)
 自チームGKセーブ率：${mySv}/${myOnT} (${myGkRate}%)`;
 
+  // コピーできない環境では、テキストを表示して手動でコピーしてもらう
+  const fallback = () => prompt('コピーできなかったので、下の文字を長押ししてコピーしてください', txt);
+  if (!navigator.clipboard) { fallback(); return; }
   navigator.clipboard.writeText(txt).then(() => {
     alert('LINE貼り付け用の集計テキストをコピーしました！');
-  });
+  }).catch(fallback);
 }
 
 // サンプルデータ読込
 function loadSampleData() {
+  if (state.events.length > 0 && !confirm('今の試合記録を消して、サンプルデータに置き換えますか？')) return;
   state.events = [
     { id:1, half:'前半', period:'0-5分', team:'my', playerNum:7, defTeam:'opp', gkNum:1, zone:'9m', category:'shot', action:'ゴール' },
     { id:2, half:'前半', period:'0-5分', team:'opp', playerNum:10, defTeam:'my', gkNum:1, zone:'6m', category:'shot', action:'GKセーブ' },
@@ -1296,9 +1339,18 @@ function loadSampleData() {
 }
 
 function clearAllEvents() {
-  if (!confirm('記録したプレー履歴をリセットしますか？（登録した選手は消えません）')) return;
+  if (!confirm('記録したプレー履歴と試合時間をリセットしますか？（登録した選手は消えません）')) return;
+  if (state.running) toggleTimer();
   state.events = [];
+  state.half = '前半';
+  state.period = PERIODS[0];
+  state.sec = 0;
+  state.halfSec = { '前半': 0, '後半': 0 };
+  state.attackMode = 'my';
+  state.selectedShooter = { my: null, opp: null };
+  state.selectedZone = null;
   saveState();
+  updateClock(false);
   renderTopBar();
   renderRecScreen();
   renderAllStats();
