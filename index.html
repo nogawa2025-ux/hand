@@ -92,7 +92,7 @@
 
   /* === 記録タブ（スクロールゼロ設計） === */
   .rec-layout {
-    display: flex; flex-direction: column; justify-content: space-between;
+    display: flex; flex-direction: column; justify-content: flex-start;
     height: 100%; padding: 4px 6px; gap: 4px; overflow: hidden;
   }
 
@@ -141,18 +141,19 @@
   }
 
   /* ② シューター／プレー選手選択（高密度グリッド） */
-  .player-sec { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .player-sec { flex-shrink: 0; display: flex; flex-direction: column; }
   .player-grid {
     display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px;
-    overflow-y: auto; flex: 1; align-content: start;
+    overflow-y: auto; align-content: start;
+    max-height: 92px; /* 3段まで表示し、それ以上はスクロール */
   }
   .p-btn {
     border: 1.5px solid var(--border); border-radius: 5px; background: #f8fafc;
-    padding: 3px 1px; text-align: center; cursor: pointer;
+    padding: 1px; text-align: center; cursor: pointer;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    min-height: 34px;
+    min-height: 28px;
   }
-  .p-btn .p-num { font-size: 13px; font-weight: 900; line-height: 1.1; }
+  .p-btn .p-num { font-size: 12px; font-weight: 900; line-height: 1.1; }
   .p-btn .p-name { font-size: 8px; color: #475569; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; line-height: 1; }
   .p-btn.my-selected { background: var(--my-color); color: #fff; border-color: #1e3a8a; }
   .p-btn.my-selected .p-name { color: #dbeafe; }
@@ -174,8 +175,10 @@
   }
 
   /* ④ アクション（結果）ボタン群 */
-  .action-sec { flex-shrink: 0; display: flex; flex-direction: column; gap: 3px; }
+  /* 結果ボタンは親指で押しやすい画面下側に寄せる */
+  .action-sec { flex-shrink: 0; margin-top: auto; display: flex; flex-direction: column; gap: 3px; }
   .shot-result-grid {
+    height: clamp(56px, 13vh, 110px); /* 選手欄を詰めた分、画面の高さに合わせて大きくする */
     display: grid; grid-template-columns: 1.3fr 1.3fr 1fr 1fr; gap: 4px;
   }
   .act-btn {
